@@ -1,0 +1,194 @@
+QA AUDIT REPORT — API TESTING
+==============================
+Site    : restful-booker.herokuapp.com
+Audited : 2026-04-26
+Type    : REST API (CRUD + Auth)
+Stack   : Node.js / Express / Heroku
+Auditor : QA Specialist (Agency Agents Framework)
+
+================================================================
+
+API TESTER — ENDPOINT RESULTS
+-------------------------------
+
+Endpoint                          Method   Status   Result
+-------------------------------------------------------------------
+/booking                          GET      200      PASS
+/booking/1                        GET      200      PASS
+/booking/99999                    GET      404      PASS
+/auth (valid credentials)         POST     200      PASS — token returned
+/auth (invalid credentials)       POST     200      BUG  — should be 401
+/booking (valid payload)          POST     200      BUG  — should be 201
+/booking (missing fields)         POST     500      BUG  — should be 400
+/booking/1 (no auth)              DELETE   403      PASS — auth enforced
+/booking/1 (no auth)              PUT      403      PASS — auth enforced
+/booking/1 (no auth)              PATCH    403      PASS — auth enforced
+/booking?checkin=not-a-date       GET      500      BUG  — should be 400
+/booking (totalprice: -999)       POST     200      BUG  — negative price accepted
+/auth (missing password field)    POST     200      BUG  — should be 400
+
+
+================================================================
+
+EVIDENCE COLLECTOR — BUG REPORT
+---------------------------------
+
+BUG #1 — Wrong HTTP Status on Failed Authentication
+  Endpoint : POST /auth
+  Payload  : {"username":"wrong","password":"wrong"}
+  Expected : 401 Unauthorized
+  Actual   : 200 OK  {"reason":"Bad credentials"}
+  Severity : HIGH
+  Detail   : Any client checking HTTP status code to determine auth
+             success will treat a failed login as successful. Breaks
+             standard auth flows and automated test assertions.
+  Fix      : Return 401 Unauthorized when credentials are invalid.
+
+BUG #2 — Resource Creation Returns 200 Instead of 201
+  Endpoint : POST /booking
+  Expected : 201 Created
+  Actual   : 200 OK
+  Severity : MEDIUM
+  Detail   : Violates REST conventions. Clients and API gateways rely
+             on 201 to confirm resource creation. Causes failures in
+             automated pipelines that assert correct status codes.
+  Fix      : Return 201 Created on successful booking creation.
+
+BUG #3 — Missing Required Fields Causes 500 Server Error
+  Endpoint : POST /booking
+  Payload  : {"firstname":"John"}
+  Expected : 400 Bad Request with field-level validation errors
+  Actual   : 500 Internal Server Error
+  Severity : CRITICAL
+  Detail   : Server crashes on malformed input. In production this
+             exposes internal error state, leaks stack traces, and
+             signals exploitable input paths to attackers.
+  Fix      : Add input validation. Return 400 with descriptive
+             error message listing missing required fields.
+
+BUG #4 — Invalid Date Filter Crashes Server
+  Endpoint : GET /booking?checkin=not-a-date
+  Expected : 400 Bad Request
+  Actual   : 500 Internal Server Error
+  Severity : CRITICAL
+  Detail   : Unvalidated query parameter crashes the endpoint.
+             Any malformed date input in a query string takes down
+             the booking search functionality entirely.
+  Fix      : Validate date format before processing. Return 400
+             with message: "Invalid date format. Use YYYY-MM-DD."
+
+BUG #5 — Negative Price Accepted on Booking Creation
+  Endpoint : POST /booking
+  Payload  : {"totalprice": -999, ...}
+  Expected : 400 Bad Request
+  Actual   : 200 OK — booking created with totalprice: -999
+  Severity : HIGH
+  Detail   : No numeric validation on totalprice field. In a real
+             system this corrupts financial records and could be
+             exploited to create negative-value transactions.
+  Fix      : Validate totalprice is a positive number >= 0.
+
+BUG #6 — Auth Endpoint Accepts Incomplete Payload Silently
+  Endpoint : POST /auth
+  Payload  : {"username":"admin"}  (password field omitted)
+  Expected : 400 Bad Request
+  Actual   : 200 OK  {"reason":"Bad credentials"}
+  Severity : MEDIUM
+  Detail   : Incomplete payloads are silently processed rather than
+             rejected. Indicates missing schema validation on the
+             auth request body.
+  Fix      : Validate that both username and password fields are
+             present. Return 400 if either is missing.
+
+BUG #7 — Security Headers Missing / Tech Stack Exposed
+  Observed : X-Powered-By: Express (present in all responses)
+  Missing  : X-Content-Type-Options: nosniff
+             X-Frame-Options: DENY
+             Strict-Transport-Security: max-age=31536000
+             Content-Security-Policy
+  Severity : MEDIUM
+  Detail   : X-Powered-By reveals the server technology to attackers.
+             Missing security headers are flagged by OWASP ZAP,
+             Burp Suite, and all standard security scanners.
+  Fix      : Add helmet.js middleware to Express to set all
+             security headers and remove X-Powered-By automatically.
+             npm install helmet
+
+
+================================================================
+
+PERFORMANCE BENCHMARKER
+-------------------------
+
+Metric                     Result       Status
+---------------------------------------------------
+Homepage load              0.43s        PASS
+GET /booking/1             0.45s        PASS
+POST /booking              ~0.50s       PASS
+HTTPS enforced             Yes          PASS
+Heroku cold start risk     Possible     WARN
+  (free/hobby tier may sleep between requests)
+CDN                        None         WARN
+  (direct Heroku routing only)
+API response compression   Unverified   WARN
+  (no Content-Encoding header observed)
+
+
+================================================================
+
+REALITY CHECKER — PRODUCTION READINESS VERDICT
+------------------------------------------------
+
+VERDICT: NEEDS WORK
+
+API QUALITY SCORE: 5/10
+
+CRITICAL — Must fix before any production use:
+  [1] POST /booking with missing fields returns 500
+      Server crashes on bad input. Return 400 + validation errors.
+  [2] GET /booking?checkin=not-a-date returns 500
+      Unvalidated query param crashes the endpoint.
+
+HIGH — Fix before production use:
+  [3] POST /auth returns 200 on failed login (must be 401)
+  [4] POST /booking accepts negative totalprice values
+  [5] X-Powered-By header exposes stack to attackers
+
+MEDIUM — Should fix:
+  [6] POST /booking returns 200 instead of 201 Created
+  [7] POST /auth accepts payload with missing fields
+  [8] No standard security headers on any response
+
+5 QUICK WINS (under 30 minutes each):
+  1. Add input validation middleware — fixes bugs #3, #4, #5, #6
+  2. Fix auth status codes — change 200 to 401 on bad credentials
+  3. Fix booking creation status code — change 200 to 201
+  4. Add helmet.js — fixes all security header issues in one line
+  5. Add date format validation on query params — fixes bug #4
+
+================================================================
+
+APPENDIX — ENDPOINTS TESTED
+-----------------------------
+  GET    /booking
+  GET    /booking/:id
+  GET    /booking?checkin=not-a-date (edge case)
+  GET    /booking?firstname=Susan (filter)
+  POST   /auth (valid credentials)
+  POST   /auth (invalid credentials)
+  POST   /auth (missing password field)
+  POST   /booking (valid payload)
+  POST   /booking (missing required fields)
+  POST   /booking (negative totalprice)
+  PUT    /booking/:id (no auth)
+  PATCH  /booking/:id (no auth)
+  DELETE /booking/:id (no auth)
+
+NOTE: This API is intentionally built with bugs as a testing
+practice tool by Mark Winteringham (@2bittester). All bugs
+documented here are real and reproducible. This report is valid
+as a portfolio sample for QA freelance work.
+
+================================================================
+END OF REPORT
+================================================================
